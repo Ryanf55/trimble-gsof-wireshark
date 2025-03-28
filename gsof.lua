@@ -242,6 +242,7 @@ end
 
 -- GSOF Subdissector Function
 function gsof_proto.dissector(buffer, pinfo, tree)
+    pinfo.cols.protocol = gsof_proto.name
     local offset = 0
     local gsof_tree = tree:add(gsof_proto, buffer(), "GSOF Records")
 

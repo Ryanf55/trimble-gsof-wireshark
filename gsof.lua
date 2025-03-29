@@ -216,7 +216,11 @@ local function parse_gsof_50(tree, buffer, offset)
 end
 
 local function parse_gsof_70(tree, buffer, offset)
-    tree:add(gsof_70_fields.latitude, buffer(offset, 8))
+    local lat_rad = buffer(offset, 8):le_float() -- Extract as double (little-endian)
+    local lat_deg = math.deg(lat_rad) -- Convert to degrees
+    lat_item = tree:add(gsof_70_fields.latitude, buffer(offset, 8))
+    lat_item:set_text("FOO")
+    -- lat_item:set_text("Latitude: %.6f° (%.6f rad)", lat_deg, lat_rad))
     offset = offset + 8
 
     tree:add(gsof_70_fields.longitude, buffer(offset, 8))
@@ -271,56 +275,82 @@ end
 
 -- DCOL Dissector Function
 function dcol_proto.dissector(buffer, pinfo, tree)
-    if buffer:len() < 6 then return end  
-
     pinfo.cols.protocol = dcol_proto.name
-    local subtree = tree:add(dcol_proto, buffer(), "DCOL Packet")
-
     local offset = 0
-    subtree:add(dcol_fields.stx, buffer(offset, 1))
-    offset = offset + 1
+    local udp_length = buffer:len()
 
-    subtree:add(dcol_fields.status, buffer(offset, 1))
-    offset = offset + 1
+    while offset < udp_length do
+        if offset + 6 > udp_length then 
+            tree:add_expert_info(PI_MALFORMED, PI_ERROR, "Truncated DCOL packet")
+            break 
+        end
 
-    local packet_type = buffer(offset, 1):uint()
-    subtree:add(dcol_fields.packet_type, buffer(offset, 1))
-    offset = offset + 1
+        -- Ensure STX is present
+        if buffer(offset, 1):uint() ~= 0x02 then
+            tree:add_expert_info(PI_MALFORMED, PI_WARN, "Expected STX (0x02) but not found")
+            break
+        end
 
-    local payload_length = buffer(offset, 1):uint()
-    print("Payload LengthA: ", payload_length)
-    subtree:add(dcol_fields.length, buffer(offset, 1), payload_length)
-    offset = offset + 1
+        local start_offset = offset
 
-    -- Boundary Check
-    if payload_length > buffer:len() - offset - 2 then
-        subtree:add_expert_info(PI_MALFORMED, PI_ERROR, 
-            string.format("Payload length %d exceeds available data %d", payload_length, buffer:len() - offset - 2))
-        return
-    end
+        -- Read packet header fields
+        local stx = buffer(offset, 1)
+        local status = buffer(offset + 1, 1)
+        local packet_type = buffer(offset + 2, 1):uint()
+        local payload_length = buffer(offset + 3, 1):uint()
 
-    -- Check if Packet Type is 40h (GENOUT)
-    if packet_type == 0x40 then
-        local genout_tvb = buffer(offset, payload_length):tvb()
-        local genout_tree = subtree:add(genout_proto, genout_tvb, "GENOUT Packet")
+        -- Calculate total packet size
+        local packet_size = payload_length + 6  -- STX + status + type + length + checksum + ETX
 
-        genout_proto.dissector(genout_tvb, pinfo, genout_tree)
-    else
-        -- Otherwise, treat as raw payload
-        subtree:add(dcol_fields.payload, buffer(offset, payload_length))
-    end
+        -- Ensure we don't read beyond the buffer
+        if offset + packet_size > udp_length then
+            tree:add_expert_info(PI_MALFORMED, PI_ERROR, "Packet length exceeds available data")
+            break
+        end
 
-    offset = offset + payload_length
+        -- **🔹 Create the subtree only for the current packet range**
+        local subtree = tree:add(dcol_proto, buffer(offset, packet_size), "DCOL Packet")
 
-    -- Add Checksum
-    if offset + 1 > buffer:len() then return end
-    subtree:add(dcol_fields.checksum, buffer(offset, 1))
-    offset = offset + 1
+        subtree:add(dcol_fields.stx, stx)
+        subtree:add(dcol_fields.status, status)
+        subtree:add(dcol_fields.packet_type, buffer(offset + 2, 1))
+        subtree:add(dcol_fields.length, buffer(offset + 3, 1))
 
-    -- Add End Transmission (ETX)
-    if offset < buffer:len() then
+        offset = offset + 4  -- Move past header fields
+
+        -- Process GENOUT packets
+        if packet_type == 0x40 then
+            local genout_tvb = buffer(offset, payload_length):tvb()
+            local genout_tree = subtree:add(genout_proto, genout_tvb, "GENOUT Packet")
+            genout_proto.dissector(genout_tvb, pinfo, genout_tree)
+        else
+            subtree:add(dcol_fields.payload, buffer(offset, payload_length))
+        end
+
+        offset = offset + payload_length
+
+        -- Ensure there's enough data for checksum + ETX
+        if offset + 2 > udp_length then 
+            subtree:add_expert_info(PI_MALFORMED, PI_ERROR, "Missing checksum or ETX")
+            break 
+        end
+
+        -- Add checksum
+        subtree:add(dcol_fields.checksum, buffer(offset, 1))
+        offset = offset + 1
+
+        -- Ensure ETX (0x03)
+        if buffer(offset, 1):uint() ~= 0x03 then
+            subtree:add_expert_info(PI_MALFORMED, PI_ERROR, "Missing ETX (0x03)")
+            break
+        end
         subtree:add(dcol_fields.etx, buffer(offset, 1))
+        offset = offset + 1
+
+        -- Ensure progress
+        if offset == start_offset then break end
     end
+
 end
 
 -- GENOUT Dissector Function
@@ -342,11 +372,7 @@ function genout_proto.dissector(buffer, pinfo, tree)
 
     -- Remaining is GSOF Data
     if buffer:len() > offset then
-        -- local gsof_tvb = buffer(offset):tvb()
-        print("Payload LengthB: ", payload_length)
         local gsof_tvb = buffer(offset)
-        print("gsof_tvb: ", gsof_tvb)
-        -- local gsof_tree = subtree:add(genout_fields.gsof_data, gsof_tvb, "GSOF Messages")
         local gsof_tree = subtree:add(genout_fields.gsof_data, gsof_tvb)
 
         -- Call GSOF Parser TODO

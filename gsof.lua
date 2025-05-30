@@ -37,6 +37,14 @@ local gsof_fields = {
 }
 gsof_proto.fields = gsof_fields
 
+-- GSOF 1 (pos time) Fields
+local gsof_1_fields = {
+    gps_time_ms = ProtoField.uint32("gsof.postime.gps_time_ms", "GPS Time (ms)", base.DEC),
+    gps_week_number = ProtoField.uint16("gsof.postime.gps_week_number", "GPS Week Number", base.DEC),
+    number_svs_used = ProtoField.uint8("gsof.postime.n_svs_used", "Number of satellites used to determine position", base.DEC),
+}
+gsof_proto.fields = gsof_1_fields
+
 -- GSOF 49 (INS Full Navigation) Fields
 local gsof_49_fields = {
     gps_week_number = ProtoField.uint16("gsof.ins.gps_week_number", "GPS Week Number", base.DEC),
@@ -109,6 +117,17 @@ local function get_gsof_record_name(record_type)
 
     }
     return record_types[record_type] or "Unknown"
+end
+
+local function parse_gsof_1(tree, buffer, offset)
+    tree:add(gsof_1_fields.gps_time_ms, buffer(offset, 4))
+    offset = offset + 4
+
+    tree:add(gsof_1_fields.gps_week_number, buffer(offset, 2))
+    offset = offset + 2
+
+    tree:add(gsof_1_fields.number_svs_used, buffer(offset, 1))
+    offset = offset + 1
 end
 
 local function parse_gsof_49(tree, buffer, offset)
@@ -235,7 +254,10 @@ end
 local function parse_gsof(record_tree, record_type, buffer, offset, record_length)
     local tree = record_tree:add(gsof_proto, buffer(offset + 2, record_length), get_gsof_record_name(record_type) .. " Data")
     offset = offset + 2  -- Skip record_type and record_length
-    if record_type == 49 then
+
+    if record_type == 1 then
+        parse_gsof_1(tree, buffer, offset)
+    elseif record_type == 49 then
         parse_gsof_49(tree, buffer, offset)
     elseif record_type == 50 then
         parse_gsof_50(tree, buffer, offset)
